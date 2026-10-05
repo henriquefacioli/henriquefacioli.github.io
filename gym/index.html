@@ -1228,7 +1228,7 @@ header.app-header {
     constructor(options = {}) {
       this.connection = new ConnectionState();
       this.timeoutMs = options.timeoutMs ?? 6e4;
-      this.storage = options.storage || (typeof localStorage !== "undefined" ? localStorage : null);
+      this.storage = options.storage || (typeof localStorage !== "undefined" && typeof localStorage.getItem === "function" ? localStorage : null);
       this.fetchFn = options.fetchFn || (typeof fetch !== "undefined" ? typeof window !== "undefined" ? fetch.bind(window) : fetch.bind(globalThis) : null);
       this.isGas = options.isGas !== void 0 ? options.isGas : typeof window !== "undefined" && Boolean(window.google?.script?.run);
       this.isLocalDev = options.isLocalDev !== void 0 ? options.isLocalDev : typeof window !== "undefined" && window.location?.hostname === "localhost";
@@ -1377,19 +1377,24 @@ header.app-header {
   var STORAGE_KEY = "my_gym_theme_preference";
   var ThemeManager = class {
     constructor() {
-      this.mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+      this.mediaQuery = typeof window !== "undefined" && typeof window.matchMedia === "function" ? window.matchMedia("(prefers-color-scheme: dark)") : null;
       this.preference = this.loadPreference();
-      this.mediaQuery.addEventListener("change", () => {
-        if (this.preference === "system") {
-          this.applyTheme();
-        }
-      });
+      if (this.mediaQuery?.addEventListener) {
+        this.mediaQuery.addEventListener("change", () => {
+          if (this.preference === "system") {
+            this.applyTheme();
+          }
+        });
+      }
       this.applyTheme();
     }
     loadPreference() {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (saved === "light" || saved === "dark" || saved === "system") {
-        return saved;
+      try {
+        const saved = typeof localStorage !== "undefined" ? localStorage.getItem(STORAGE_KEY) : null;
+        if (saved === "light" || saved === "dark" || saved === "system") {
+          return saved;
+        }
+      } catch {
       }
       return "system";
     }
@@ -1398,17 +1403,23 @@ header.app-header {
     }
     getResolvedTheme() {
       if (this.preference === "system") {
-        return this.mediaQuery.matches ? "dark" : "light";
+        return this.mediaQuery?.matches ? "dark" : "light";
       }
       return this.preference;
     }
     setPreference(pref) {
       if (pref !== "system" && pref !== "light" && pref !== "dark") return;
       this.preference = pref;
-      localStorage.setItem(STORAGE_KEY, pref);
+      try {
+        if (typeof localStorage !== "undefined") {
+          localStorage.setItem(STORAGE_KEY, pref);
+        }
+      } catch {
+      }
       this.applyTheme();
     }
     applyTheme() {
+      if (typeof document === "undefined") return;
       const resolved = this.getResolvedTheme();
       document.documentElement.setAttribute("data-theme", resolved);
       document.documentElement.setAttribute("data-theme-preference", this.preference);
@@ -2145,14 +2156,6 @@ header.app-header {
   }) {
     let holdTimeout = null;
     let repeatInterval = null;
-    function triggerHaptic() {
-      if (typeof navigator !== "undefined" && "vibrate" in navigator && typeof navigator.vibrate === "function") {
-        try {
-          navigator.vibrate(12);
-        } catch {
-        }
-      }
-    }
     function roundValue(v) {
       if (precision === 0) return Math.round(v);
       const factor = Math.pow(10, precision);
@@ -2162,11 +2165,14 @@ header.app-header {
       return Math.min(max, Math.max(min, v));
     }
     function applyDelta(delta) {
-      const current = Number(getValue()) || 0;
+      const currentVal = getValue ? getValue() : inputEl ? inputEl.value : 0;
+      const current = Number(currentVal !== "" && currentVal !== null && currentVal !== void 0 ? currentVal : inputEl ? inputEl.value : 0) || 0;
       const next = roundValue(clamp(current + delta));
       setValue(next);
+      if (inputEl) {
+        inputEl.value = String(next);
+      }
       if (onChanged) onChanged(next);
-      triggerHaptic();
     }
     function stopRepeating(btn, pointerId) {
       if (holdTimeout) {
@@ -2269,6 +2275,70 @@ header.app-header {
       }
     };
   }
+
+  // src/client/haptics.js
+  var HAPTIC_STORAGE_KEY = "my_gym_haptics";
+  var HapticManager = class {
+    constructor(storage = typeof localStorage !== "undefined" ? localStorage : null, nav = null) {
+      this.storage = storage;
+      this.nav = nav;
+    }
+    getNav() {
+      return this.nav || (typeof navigator !== "undefined" ? navigator : null);
+    }
+    isSupported() {
+      const nav = this.getNav();
+      return Boolean(nav && "vibrate" in nav && typeof nav.vibrate === "function");
+    }
+    getStorage() {
+      if (this.storage && typeof this.storage.getItem === "function") {
+        return this.storage;
+      }
+      if (typeof localStorage !== "undefined" && typeof localStorage.getItem === "function") {
+        return localStorage;
+      }
+      return null;
+    }
+    isEnabled() {
+      try {
+        const store = this.getStorage();
+        return store ? store.getItem(HAPTIC_STORAGE_KEY) === "true" : Boolean(this._fallbackEnabled);
+      } catch {
+        return false;
+      }
+    }
+    setEnabled(enabled) {
+      try {
+        const store = this.getStorage();
+        if (store) {
+          store.setItem(HAPTIC_STORAGE_KEY, enabled ? "true" : "false");
+        } else {
+          this._fallbackEnabled = Boolean(enabled);
+        }
+      } catch {
+        this._fallbackEnabled = Boolean(enabled);
+      }
+    }
+    vibrate(pattern) {
+      if (!this.isEnabled() || !this.isSupported()) return false;
+      try {
+        const nav = this.getNav();
+        return Boolean(nav.vibrate(pattern));
+      } catch {
+        return false;
+      }
+    }
+    triggerSetLogged() {
+      return this.vibrate(15);
+    }
+    triggerSessionFinished() {
+      return this.vibrate([20, 60, 20]);
+    }
+    triggerRestTimerComplete() {
+      return this.vibrate([80, 50, 80]);
+    }
+  };
+  var hapticManager = new HapticManager();
 
   // src/client/views/session.js
   var ActiveSessionView = class {
@@ -2576,7 +2646,14 @@ header.app-header {
       });
       warmupChk?.addEventListener("change", (e) => {
         this.isWarmup = e.target.checked;
-        this.renderCurrentSetPanelOnly(container);
+        const titleEl = container.querySelector(".set-panel-title");
+        if (titleEl) {
+          const plannedSetsCount = pos.plannedSets?.length || 3;
+          const allPosLogs = (session.setLogs || []).filter((l) => l.positionId === pos.id && !l.voidedAt);
+          const workingLogs = allPosLogs.filter((l) => !l.isWarmup);
+          const currentSetNum = workingLogs.length + 1;
+          titleEl.textContent = this.isWarmup ? "WARM-UP SET" : `SET ${currentSetNum} OF ${plannedSetsCount}`;
+        }
       });
       const triggerHighlight = (boxId) => {
         const box = container.querySelector(boxId);
@@ -2598,9 +2675,16 @@ header.app-header {
           minusBtn: weightMinus,
           plusBtn: weightPlus,
           inputEl: weightInput,
-          getValue: () => this.weightInputVal,
+          getValue: () => {
+            if (weightInput && weightInput.value !== "") {
+              const parsed = parseFloat(weightInput.value);
+              if (!isNaN(parsed)) return parsed;
+            }
+            return this.weightInputVal ?? 0;
+          },
           setValue: (v) => {
             this.weightInputVal = v;
+            if (weightInput) weightInput.value = String(v);
           },
           step: 2.5,
           min: 0,
@@ -2616,9 +2700,16 @@ header.app-header {
           minusBtn: repsMinus,
           plusBtn: repsPlus,
           inputEl: repsInput,
-          getValue: () => this.repsInputVal,
+          getValue: () => {
+            if (repsInput && repsInput.value !== "") {
+              const parsed = parseInt(repsInput.value, 10);
+              if (!isNaN(parsed)) return parsed;
+            }
+            return this.repsInputVal ?? 0;
+          },
           setValue: (v) => {
             this.repsInputVal = v;
+            if (repsInput) repsInput.value = String(v);
           },
           step: 1,
           min: 0,
@@ -2642,6 +2733,7 @@ header.app-header {
           restSeconds: pos.restSeconds || 90
         });
         if (saved !== false) {
+          hapticManager.triggerSetLogged();
           this.weightInputVal = weight;
           this.repsInputVal = reps;
           this.isWarmup = false;
@@ -2999,9 +3091,10 @@ header.app-header {
     }
     render() {
       const currentPref = themeManager.getPreference();
-      const currentUnit = localStorage.getItem("my_gym_units") || "kg";
+      const currentUnit = (typeof localStorage !== "undefined" && typeof localStorage.getItem === "function" ? localStorage.getItem("my_gym_units") : null) || "kg";
+      const hapticsEnabled = hapticManager.isEnabled();
       const spreadsheetUrl = spreadsheetLink(this.app.spreadsheetUrl);
-      const shortcutUrl = spreadsheetLink(localStorage.getItem("my_gym_spreadsheet_url"));
+      const shortcutUrl = spreadsheetLink(typeof localStorage !== "undefined" && typeof localStorage.getItem === "function" ? localStorage.getItem("my_gym_spreadsheet_url") : null);
       const remoteConfig = transport.getRemoteConfig();
       return `
       <div class="modal-overlay" id="settings-overlay">
@@ -3030,6 +3123,16 @@ header.app-header {
                 <button class="segmented-option ${currentUnit === "kg" ? "active" : ""}" data-unit-val="kg">Kilograms (kg)</button>
                 <button class="segmented-option ${currentUnit === "lbs" ? "active" : ""}" data-unit-val="lbs">Pounds (lbs)</button>
               </div>
+            </div>
+
+            <!-- Haptic Feedback (Vibration) -->
+            <div>
+              <label class="form-label">Haptic Feedback (Vibration)</label>
+              <div class="segmented-control" id="haptics-segmented">
+                <button class="segmented-option ${!hapticsEnabled ? "active" : ""}" data-haptics-val="off">Off</button>
+                <button class="segmented-option ${hapticsEnabled ? "active" : ""}" data-haptics-val="on">On</button>
+              </div>
+              <p class="metadata-text" style="margin-top: 6px;">Vibrates briefly when logging a set, finishing a workout, or when rest ends.</p>
             </div>
 
             <!-- Cloud Connection (Google Sheets) -->
@@ -3199,6 +3302,18 @@ header.app-header {
           container.querySelectorAll("#units-segmented .segmented-option").forEach((b) => b.classList.remove("active"));
           btn.classList.add("active");
           this.app.render();
+        });
+      });
+      container.querySelectorAll("#haptics-segmented .segmented-option").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const val = btn.dataset.hapticsVal;
+          const enabled = val === "on";
+          hapticManager.setEnabled(enabled);
+          if (enabled) {
+            hapticManager.triggerSetLogged();
+          }
+          container.querySelectorAll("#haptics-segmented .segmented-option").forEach((b) => b.classList.remove("active"));
+          btn.classList.add("active");
         });
       });
       container.querySelector("#btn-export-backup")?.addEventListener("click", async () => {
@@ -5460,6 +5575,7 @@ header.app-header {
         this.restTimer.remainingSeconds--;
         if (this.restTimer.remainingSeconds <= 0) {
           this.endRestTimer();
+          hapticManager.triggerRestTimerComplete();
         }
         this.updateRestDisplay();
       }, 1e3);
@@ -5554,6 +5670,7 @@ header.app-header {
             sessionId: session.id,
             sessionNote: note || void 0
           });
+          hapticManager.triggerSessionFinished();
           this.endRestTimer();
           this.activeSession = null;
           close();
